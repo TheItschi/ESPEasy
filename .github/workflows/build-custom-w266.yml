@@ -1,0 +1,46 @@
+# Builds a small custom ESP8266 firmware with the Ventus W266 plugin (P046).
+# src/Custom.h is gitignored, so the tracked tools/ci/custom/Custom_W266.h is copied in before the build.
+
+name: Build custom W266
+
+on:
+  push:
+    branches: [w266-lightning-fix]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [custom_312_ESP8266_4M1M, custom_274_ESP8266_1M]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: false
+      - name: Install dependencies
+        run: |
+          uv pip install --system pioarduino
+          uv pip install --system -r requirements.txt
+      - name: Use custom build config
+        run: cp tools/ci/custom/Custom_W266.h src/Custom.h
+      - name: Run PlatformIO
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: '1'
+        run: platformio run -e ${{ matrix.env }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ESPEasy-W266-${{ matrix.env }}-${{ github.run_number }}
+          path: ./build_output/bin
+          if-no-files-found: error
