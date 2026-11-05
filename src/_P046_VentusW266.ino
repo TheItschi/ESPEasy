@@ -155,6 +155,7 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
       dev.VType          = Sensor_VType::SENSOR_TYPE_DUAL; // New type, see ESPEasy.ino
       dev.FormulaOption  = true;
       dev.SendDataOption = true;
+      dev.TimerOption    = true;                           // Allow setting the task interval
       dev.ValueCount     = 3;
       break;
     }
@@ -577,7 +578,7 @@ void Plugin_046_ISR_SCLK() // Interrupt on SCLK rising
       P046_data->Plugin_046_ISR_Buffer[P046_data->Plugin_046_bytepointer] = P046_data->Plugin_046_receivedData;
       P046_data->Plugin_046_bytepointer++;           // TReady for the next uint8_t ...
 
-      if (P046_data->Plugin_046_bytepointer > Plugin_046_RAW_BUFFER_SIZE) {
+      if (P046_data->Plugin_046_bytepointer >= Plugin_046_RAW_BUFFER_SIZE) { // Was '>': wrote 1 byte past ISR_Buffer into databuffer[0]
         P046_data->Plugin_046_ReceiveActive = false; // We don't want a bufferoverflow, so abort
         P046_data->Plugin_046_MasterSlave   = false;
       }
