@@ -53,4 +53,4 @@ jobs:
         with:
           name: ESPEasy-LCD-${{ matrix.env }}-${{ github.run_number }}
           path: ./build_output/bin
-          if-no-files-found: error
+          if-no-files-found: warn  # non-custom envs write their binaries elsewhere
