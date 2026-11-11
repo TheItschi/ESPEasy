@@ -24,6 +24,8 @@ jobs:
             st7567: ''
           - env: custom_ESP32_4M316k      # default for ESP32: ST7567 enabled
             st7567: ''
+          - env: minimal_core_312_ESP8266_1M_OTA_FHEM_HA  # failed in upstream CI (lib_ignore)
+            st7567: ''
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -41,7 +43,7 @@ jobs:
       - name: Use custom build config
         run: |
           cp tools/ci/custom/Custom_LCD.h src/Custom.h
-          if [ -n "${{ matrix.st7567 }}" ]; then echo "#define FEATURE_ST7567 ${{ matrix.st7567 }}" >> src/Custom.h; fi
+          if [ -n "${{ matrix.st7567 }}" ]; then echo "#define P141_FEATURE_ST7567 ${{ matrix.st7567 }}" >> src/Custom.h; fi
       - name: Run PlatformIO
         env:
           PYTHONIOENCODING: utf-8
