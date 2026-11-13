@@ -149,6 +149,7 @@ uint8_t P046_getValueCount(int choice) {
   switch (choice) {
     case 0: // Main + Temp/Hygro
     case 2: // Rain
+    case 3: // UV: 2nd value is a placeholder, formatUserVar returns nothing for values beyond the count
     case 4: // Lightning strikes
       return 2;
     case 1: // Wind
@@ -313,7 +314,7 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
         case 0: names[0] = F("Temperature"); names[1] = F("Humidity"); break;
         case 1: names[0] = F("Direction");   names[1] = F("Average"); names[2] = F("Gust"); break;
         case 2: names[0] = F("Rain");        names[1] = F("RainTotal"); break;
-        case 3: names[0] = F("UV");          break;
+        case 3: names[0] = F("UV");          names[1] = F("Unused"); break;
         case 4: names[0] = F("Strikes");     names[1] = F("StrikeCount"); break;
         case 5: names[0] = F("Distance");    break;
       }
