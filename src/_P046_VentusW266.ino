@@ -401,12 +401,11 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
         if (P046_data->Plugin_046_newData) {
           uint8_t crc = 0xff; // init = 0xff
           char    data;       // CRC = MAXIM with modified init: poly 0x31, init 0xff, refin 1; refout 1, xorout 0x00
-          // Copy received data to buffer and check CRC
-          P046_data->Plugin_046_databuffer[0] = P046_data->Plugin_046_ISR_Buffer[0];
-
+          // Check CRC on the ISR buffer first; only a valid frame replaces the data the tasks read from.
+          // (Copying first and invalidating on a CRC error threw away the last good frame, so a single
+          // corrupted frame left all tasks without values until the next good one.)
           for (int i = 1; i < P046_data->Plugin_046_bytepointer; i++) {
-            data                                = P046_data->Plugin_046_ISR_Buffer[i];
-            P046_data->Plugin_046_databuffer[i] = data;
+            data = P046_data->Plugin_046_ISR_Buffer[i];
 
             for (int j = 0; j < 8; j++) // crc routine from Jim Studt
             {                           // Onewire library
@@ -429,11 +428,11 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
             if ((i == 2) || (i == 3) || (i == 4) || (i == 9) || (i == 10) || (i == 14) || (i == 17) || (i == 18) || (i == 20)) {
               log += ':';
             }
-            char myHex = (P046_data->Plugin_046_databuffer[i] >> 4) + 0x30;
+            char myHex = (P046_data->Plugin_046_ISR_Buffer[i] >> 4) + 0x30;
 
             if (myHex > 0x39) { myHex += 7; }
             log  += myHex;
-            myHex = (P046_data->Plugin_046_databuffer[i] & 0x0f) + 0x30;
+            myHex = (P046_data->Plugin_046_ISR_Buffer[i] & 0x0f) + 0x30;
 
             if (myHex > 0x39) { myHex += 7; }
             log += myHex;
@@ -451,9 +450,13 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
             #  endif // PLUGIN_046_DEBUG
             # endif // BUILD_NO_DEBUG
 
-          if (crc != 00)
+          if (crc == 0)
           {
-            P046_data->Plugin_046_databuffer[0] = 0; // Not MagicByte, so not valid.
+            memcpy(P046_data->Plugin_046_databuffer, P046_data->Plugin_046_ISR_Buffer, Plugin_046_Payload);
+          }
+
+          if (loglevelActiveFor(LOG_LEVEL_INFO)) {
+            addLog(LOG_LEVEL_INFO, crc == 0 ? F("W266 : frame OK") : F("W266 : frame CRC error, keeping last good frame"));
           }
         }
       }
