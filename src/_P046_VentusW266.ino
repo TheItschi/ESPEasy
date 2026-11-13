@@ -416,48 +416,29 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
               data >>= 1;
             }
           }
-          P046_data->Plugin_046_MasterSlave = false;
-          P046_data->Plugin_046_newData     = false;
-            # ifndef BUILD_NO_DEBUG
-            #  if PLUGIN_046_DEBUG
-          String log = F("Ventus W266 Rcvd(");
-          log += node_time.getTimeString(':');
-          log += F(") ");
-
-          for (int i = 0; i < Plugin_046_Payload; i++) {
-            if ((i == 2) || (i == 3) || (i == 4) || (i == 9) || (i == 10) || (i == 14) || (i == 17) || (i == 18) || (i == 20)) {
-              log += ':';
-            }
-            char myHex = (P046_data->Plugin_046_ISR_Buffer[i] >> 4) + 0x30;
-
-            if (myHex > 0x39) { myHex += 7; }
-            log  += myHex;
-            myHex = (P046_data->Plugin_046_ISR_Buffer[i] & 0x0f) + 0x30;
-
-            if (myHex > 0x39) { myHex += 7; }
-            log += myHex;
-          }
-          log += F(" > ");
-          char myHex = (crc >> 4) + 0x30;
-
-          if (myHex > 0x39) { myHex += 7; }
-          log  += myHex;
-          myHex = (crc & 0x0f) + 0x30;
-
-          if (myHex > 0x39) { myHex += 7; }
-          log += myHex;
-          addLogMove(LOG_LEVEL_INFO, log);
-            #  endif // PLUGIN_046_DEBUG
-            # endif // BUILD_NO_DEBUG
-
           if (crc == 0)
           {
             memcpy(P046_data->Plugin_046_databuffer, P046_data->Plugin_046_ISR_Buffer, Plugin_046_Payload);
           }
 
+          // Raw frame + CRC result at INFO level, also in builds with BUILD_NO_DEBUG: needed to judge the
+          // reception quality (bytes separated per field, see the frame layout at the top of this file).
           if (loglevelActiveFor(LOG_LEVEL_INFO)) {
-            addLog(LOG_LEVEL_INFO, crc == 0 ? F("W266 : frame OK") : F("W266 : frame CRC error, keeping last good frame"));
+            String log = F("W266 : ");
+
+            for (int i = 0; i < Plugin_046_Payload; i++) {
+              if ((i == 2) || (i == 3) || (i == 4) || (i == 9) || (i == 10) || (i == 14) || (i == 17) || (i == 18) || (i == 20)) {
+                log += ':';
+              }
+              log += formatToHex_no_prefix(P046_data->Plugin_046_ISR_Buffer[i], 2);
+            }
+            log += (crc == 0) ? F(" OK") : F(" CRC error");
+            addLogMove(LOG_LEVEL_INFO, log);
           }
+
+          // Release the ISR buffer only now: the ISR accepts a new frame as soon as newData is false
+          P046_data->Plugin_046_MasterSlave = false;
+          P046_data->Plugin_046_newData     = false;
         }
       }
       success = true;
