@@ -124,6 +124,7 @@ struct P046_data_struct {
   uint8_t Plugin_046_bytepointer;                            // Pointer for ISR receive buffer
   uint8_t Plugin_046_receivedData;                           // Byte to store received bits
   uint32_t Plugin_046_captureMicros = 0;                     // Duration of the last captured transfer (ESP8266 capture ISR)
+  uint8_t  Plugin_046_unstableBits  = 0;                     // Bits whose level changed right after the clock edge
 };
 
 # include "./ESPEasy-Globals.h"
@@ -456,7 +457,8 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
             if (P046_data->Plugin_046_captureMicros != 0) {
               log += ' ';
               log += P046_data->Plugin_046_captureMicros;
-              log += F("us");
+              log += F("us unstable=");
+              log += P046_data->Plugin_046_unstableBits;
             }
             addLogMove(LOG_LEVEL_INFO, log);
           }
@@ -641,6 +643,7 @@ void Plugin_046_ISR_capture()
   bool     gotMagic       = false;
   bool     timedOut       = false;
   bool     done           = false;
+  uint8_t  unstable       = 0;
 
   while (!done) {
     uint8_t value = 0;
@@ -662,6 +665,16 @@ void Plugin_046_ISR_capture()
 
       if (!done) {
         value = (value << 1) | ((gpi & dataMask) ? 1 : 0); // MSB first
+
+        // Diagnostics: re-read the data pin for about 2 usec after the edge. A level that changes here means the
+        // bit was sampled on an unstable line; a CRC error without such bits was already wrong on the SPI bus.
+        uint32_t changed = 0;
+
+        for (uint8_t i = 0; i < 16; ++i) {
+          changed |= (GPI ^ gpi);
+        }
+
+        if ((changed & dataMask) && (unstable < 255)) { ++unstable; }
       }
     }
 
@@ -682,6 +695,7 @@ void Plugin_046_ISR_capture()
   if (gotMagic && !timedOut && (bytes == Plugin_046_Payload)) { // If not 23 then not a data packet
     P046_data->Plugin_046_bytepointer   = bytes;
     P046_data->Plugin_046_captureMicros = micros() - start;
+    P046_data->Plugin_046_unstableBits  = unstable;
     P046_data->Plugin_046_newData       = true;                 // We have new data!
   }
 }
