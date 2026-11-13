@@ -123,6 +123,7 @@ struct P046_data_struct {
   uint8_t Plugin_046_bitpointer;                             // Pointer for received bit
   uint8_t Plugin_046_bytepointer;                            // Pointer for ISR receive buffer
   uint8_t Plugin_046_receivedData;                           // Byte to store received bits
+  uint32_t Plugin_046_captureMicros = 0;                     // Duration of the last captured transfer (ESP8266 capture ISR)
 };
 
 # include "./ESPEasy-Globals.h"
@@ -143,6 +144,12 @@ volatile int Plugin_046_strikesph = 0;
 // TODO TD-er: These call-back functions are quite long and will take a lot of iRAM.
 void    Plugin_046_ISR_nSEL() IRAM_ATTR; // Interrupt routines
 void    Plugin_046_ISR_SCLK() IRAM_ATTR;
+# ifdef ESP8266
+void    Plugin_046_ISR_capture() IRAM_ATTR;
+
+// Max. polls while waiting for a clock edge within a transfer (roughly 10 ms), so a stuck line cannot lock up the ESP
+#  define Plugin_046_ISR_WAIT        80000
+# endif // ifdef ESP8266
 
 // Number of values and VType depend on the selected plugin function (PCONFIG(0))
 uint8_t P046_getValueCount(int choice) {
@@ -384,8 +391,19 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
             Plugin_046_lastraincount            = -1;
             Plugin_046_laststrikectr            = 0;
             Plugin_046_laststrikecount          = UINT_MAX;
-            attachInterrupt(P046_data->Plugin_046_SCLKpin, Plugin_046_ISR_SCLK, RISING);
-            attachInterrupt(P046_data->Plugin_046_nSELpin, Plugin_046_ISR_nSEL, CHANGE);
+            # ifdef ESP8266
+
+            if ((P046_data->Plugin_046_MOSIpin < 16) && (P046_data->Plugin_046_SCLKpin < 16) &&
+                (P046_data->Plugin_046_nSELpin < 16) && (P046_data->Plugin_046_MISOpin < 16)) {
+              // Capture the whole transfer in one interrupt, see Plugin_046_ISR_capture()
+              detachInterrupt(P046_data->Plugin_046_SCLKpin);
+              attachInterrupt(P046_data->Plugin_046_nSELpin, Plugin_046_ISR_capture, FALLING);
+            } else
+            # endif // ifdef ESP8266
+            {
+              attachInterrupt(P046_data->Plugin_046_SCLKpin, Plugin_046_ISR_SCLK, RISING);
+              attachInterrupt(P046_data->Plugin_046_nSELpin, Plugin_046_ISR_nSEL, CHANGE);
+            }
           }
           break;
         }
@@ -434,6 +452,12 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
               log += formatToHex_no_prefix(P046_data->Plugin_046_ISR_Buffer[i], 2);
             }
             log += (crc == 0) ? F(" OK") : F(" CRC error");
+
+            if (P046_data->Plugin_046_captureMicros != 0) {
+              log += ' ';
+              log += P046_data->Plugin_046_captureMicros;
+              log += F("us");
+            }
             addLogMove(LOG_LEVEL_INFO, log);
           }
 
@@ -596,6 +620,73 @@ void Plugin_046_ISR_nSEL() // Interrupt on nSEL change
     }
   }
 }
+
+# ifdef ESP8266
+
+// Interrupt on nSEL falling: capture the complete SPI transfer by polling the pins inside the ISR.
+// With one interrupt per clock edge (the functions above/below) the delay until the ISR runs varies with
+// WiFi and other activity. Bits were then sampled too late (reading the next bit) or edges were missed,
+// so only about 1 in 3 frames passed the CRC. Here the data pin is taken from the very same GPI read
+// that detects the rising clock edge.
+void Plugin_046_ISR_capture()
+{
+  if (!P046_data || P046_data->Plugin_046_newData) { return; } // Only accept new data if the old is processed
+
+  const uint32_t selMask  = 1UL << P046_data->Plugin_046_nSELpin;
+  const uint32_t clkMask  = 1UL << P046_data->Plugin_046_SCLKpin;
+  const uint32_t misoMask = 1UL << P046_data->Plugin_046_MISOpin;
+  uint32_t dataMask       = 1UL << P046_data->Plugin_046_MOSIpin; // Start on MOSI, switch to MISO after the MagicByte
+  const uint32_t start    = micros();
+  uint8_t  bytes          = 0;
+  bool     gotMagic       = false;
+  bool     timedOut       = false;
+  bool     done           = false;
+
+  while (!done) {
+    uint8_t value = 0;
+
+    for (uint8_t bit = 0; (bit < 8) && !done; ++bit) {
+      uint32_t guard = Plugin_046_ISR_WAIT;
+      uint32_t gpi;
+
+      // Wait for SCLK low, then for its rising edge. nSEL high ends the transfer.
+      while (!done && ((gpi = GPI) & clkMask)) {
+        if (gpi & selMask) { done = true; }
+        else if (--guard == 0) { done = true; timedOut = true; }
+      }
+
+      while (!done && !((gpi = GPI) & clkMask)) {
+        if (gpi & selMask) { done = true; }
+        else if (--guard == 0) { done = true; timedOut = true; }
+      }
+
+      if (!done) {
+        value = (value << 1) | ((gpi & dataMask) ? 1 : 0); // MSB first
+      }
+    }
+
+    if (!done) { // 8 bits received
+      if (bytes < Plugin_046_RAW_BUFFER_SIZE) {
+        P046_data->Plugin_046_ISR_Buffer[bytes] = value;
+      }
+
+      if (value == Plugin_046_MagicByte) { // Switch data pins?
+        gotMagic = true;
+        dataMask = misoMask;
+      }
+
+      if (bytes < 255) { ++bytes; }
+    }
+  }
+
+  if (gotMagic && !timedOut && (bytes == Plugin_046_Payload)) { // If not 23 then not a data packet
+    P046_data->Plugin_046_bytepointer   = bytes;
+    P046_data->Plugin_046_captureMicros = micros() - start;
+    P046_data->Plugin_046_newData       = true;                 // We have new data!
+  }
+}
+
+# endif // ifdef ESP8266
 
 void Plugin_046_ISR_SCLK() // Interrupt on SCLK rising
 {
