@@ -162,6 +162,7 @@ Sensor_VType P046_getVType(int choice) {
     case 0: return Sensor_VType::SENSOR_TYPE_TEMP_HUM;
     case 1: return Sensor_VType::SENSOR_TYPE_WIND;
     case 2: return Sensor_VType::SENSOR_TYPE_DUAL; // Rain rate + total, as expected by a Domoticz rain device
+    case 3: return Sensor_VType::SENSOR_TYPE_DUAL; // UV: a Domoticz UV device needs "UV;temp", value 2 stays 0
   }
 
   // Lightning strikes (4): SINGLE, so controllers only get the strike count, the raw counter (value 2) is for rules/display
@@ -351,6 +352,12 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
     {
       if (!P046_data) {
         P046_data = new (std::nothrow) P046_data_struct();
+      }
+
+      // Tasks saved before the interval was configurable have interval 0 and would only be read once
+      // at boot, before the first frame arrived, leaving their values at 0 forever.
+      if (Settings.TaskDeviceTimer[event->TaskIndex] == 0) {
+        Settings.TaskDeviceTimer[event->TaskIndex] = (Settings.Delay > 0) ? Settings.Delay : 60;
       }
 
       uint8_t choice = PCONFIG(0);
