@@ -80,6 +80,10 @@
 // thanks to Greg Cook and the team behind reveng.sourceforge.net.
 
 /** Changelog
+ * 2026-11-13 TheItschi:  Check CRC before replacing the data, a corrupted frame no longer discards the last valid frame
+ *                        Also reject frames that pass the 8 bit CRC but are implausible (temperature is sent twice, humidity is BCD)
+ *                        ESP8266: Capture the complete SPI transfer in the nSEL interrupt instead of 1 interrupt per clock edge
+ *                        Log every received frame with its result at INFO level
  * 2026-11-05 TheItschi:  Enable Interval setting (TimerOption), was taken from 'Sleep time' (default 0 = never read)
  *                        Fix inverted 5 min interval check for rain rate and lightning strikes (were always 0)
  *                        Fix lightning reference count init (-1 on unsigned), use first valid frame as reference
@@ -125,6 +129,8 @@ struct P046_data_struct {
   uint8_t Plugin_046_bitpointer;                             // Pointer for received bit
   uint8_t Plugin_046_bytepointer;                            // Pointer for ISR receive buffer
   uint8_t Plugin_046_receivedData;                           // Byte to store received bits
+  uint32_t Plugin_046_captureMicros = 0;                     // Duration of the last captured transfer (ESP8266 capture ISR)
+
 };
 
 # include "./ESPEasy-Globals.h"
@@ -145,6 +151,12 @@ volatile int Plugin_046_strikesph = 0;
 // TODO TD-er: These call-back functions are quite long and will take a lot of iRAM.
 void    Plugin_046_ISR_nSEL() IRAM_ATTR; // Interrupt routines
 void    Plugin_046_ISR_SCLK() IRAM_ATTR;
+# ifdef ESP8266
+void    Plugin_046_ISR_capture() IRAM_ATTR;
+
+// Max. polls while waiting for a clock edge within a transfer (roughly 10 ms), so a stuck line cannot lock up the ESP
+#  define Plugin_046_ISR_WAIT        80000
+# endif // ifdef ESP8266
 
 // Number of values and VType depend on the selected plugin function (PCONFIG(0))
 uint8_t P046_getValueCount(int choice) {
@@ -386,8 +398,19 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
             Plugin_046_lastraincount            = -1;
             Plugin_046_laststrikectr            = 0;
             Plugin_046_laststrikecount          = UINT_MAX;
-            attachInterrupt(P046_data->Plugin_046_SCLKpin, Plugin_046_ISR_SCLK, RISING);
-            attachInterrupt(P046_data->Plugin_046_nSELpin, Plugin_046_ISR_nSEL, CHANGE);
+            # ifdef ESP8266
+
+            if ((P046_data->Plugin_046_MOSIpin < 16) && (P046_data->Plugin_046_SCLKpin < 16) &&
+                (P046_data->Plugin_046_nSELpin < 16) && (P046_data->Plugin_046_MISOpin < 16)) {
+              // Capture the whole transfer in one interrupt, see Plugin_046_ISR_capture()
+              detachInterrupt(P046_data->Plugin_046_SCLKpin);
+              attachInterrupt(P046_data->Plugin_046_nSELpin, Plugin_046_ISR_capture, FALLING);
+            } else
+            # endif // ifdef ESP8266
+            {
+              attachInterrupt(P046_data->Plugin_046_SCLKpin, Plugin_046_ISR_SCLK, RISING);
+              attachInterrupt(P046_data->Plugin_046_nSELpin, Plugin_046_ISR_nSEL, CHANGE);
+            }
           }
           break;
         }
@@ -404,12 +427,11 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
         if (P046_data->Plugin_046_newData) {
           uint8_t crc = 0xff; // init = 0xff
           char    data;       // CRC = MAXIM with modified init: poly 0x31, init 0xff, refin 1; refout 1, xorout 0x00
-          // Copy received data to buffer and check CRC
-          P046_data->Plugin_046_databuffer[0] = P046_data->Plugin_046_ISR_Buffer[0];
-
+          // Check CRC on the ISR buffer first; only a valid frame replaces the data the tasks read from.
+          // (Copying first and invalidating on a CRC error threw away the last good frame, so a single
+          // corrupted frame left all tasks without values until the next good one.)
           for (int i = 1; i < P046_data->Plugin_046_bytepointer; i++) {
-            data                                = P046_data->Plugin_046_ISR_Buffer[i];
-            P046_data->Plugin_046_databuffer[i] = data;
+            data = P046_data->Plugin_046_ISR_Buffer[i];
 
             for (int j = 0; j < 8; j++) // crc routine from Jim Studt
             {                           // Onewire library
@@ -420,44 +442,41 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
               data >>= 1;
             }
           }
+          // The 8 bit CRC lets about 1 in 256 corrupted frames pass, so also use the redundancy in the frame:
+          // the temperature is sent twice and the humidity is BCD.
+          const uint8_t *frame = P046_data->Plugin_046_ISR_Buffer;
+          const bool plausible = (frame[4] == frame[7]) && (frame[5] == frame[8]) &&
+                                 ((frame[2] >> 4) <= 9) && ((frame[2] & 0x0F) <= 9);
+
+          if ((crc == 0) && plausible)
+          {
+            memcpy(P046_data->Plugin_046_databuffer, P046_data->Plugin_046_ISR_Buffer, Plugin_046_Payload);
+          }
+
+          // Raw frame + CRC result at INFO level, also in builds with BUILD_NO_DEBUG: needed to judge the
+          // reception quality (bytes separated per field, see the frame layout at the top of this file).
+          if (loglevelActiveFor(LOG_LEVEL_INFO)) {
+            String log = F("W266 : ");
+
+            for (int i = 0; i < Plugin_046_Payload; i++) {
+              if ((i == 2) || (i == 3) || (i == 4) || (i == 9) || (i == 10) || (i == 14) || (i == 17) || (i == 18) || (i == 20)) {
+                log += ':';
+              }
+              log += formatToHex_no_prefix(P046_data->Plugin_046_ISR_Buffer[i], 2);
+            }
+            log += (crc != 0) ? F(" CRC error") : (plausible ? F(" OK") : F(" implausible, ignored"));
+
+            if (P046_data->Plugin_046_captureMicros != 0) {
+              log += ' ';
+              log += P046_data->Plugin_046_captureMicros;
+              log += F("us");
+            }
+            addLogMove(LOG_LEVEL_INFO, log);
+          }
+
+          // Release the ISR buffer only now: the ISR accepts a new frame as soon as newData is false
           P046_data->Plugin_046_MasterSlave = false;
           P046_data->Plugin_046_newData     = false;
-            # ifndef BUILD_NO_DEBUG
-            #  if PLUGIN_046_DEBUG
-          String log = F("Ventus W266 Rcvd(");
-          log += node_time.getTimeString(':');
-          log += F(") ");
-
-          for (int i = 0; i < Plugin_046_Payload; i++) {
-            if ((i == 2) || (i == 3) || (i == 4) || (i == 9) || (i == 10) || (i == 14) || (i == 17) || (i == 18) || (i == 20)) {
-              log += ':';
-            }
-            char myHex = (P046_data->Plugin_046_databuffer[i] >> 4) + 0x30;
-
-            if (myHex > 0x39) { myHex += 7; }
-            log  += myHex;
-            myHex = (P046_data->Plugin_046_databuffer[i] & 0x0f) + 0x30;
-
-            if (myHex > 0x39) { myHex += 7; }
-            log += myHex;
-          }
-          log += F(" > ");
-          char myHex = (crc >> 4) + 0x30;
-
-          if (myHex > 0x39) { myHex += 7; }
-          log  += myHex;
-          myHex = (crc & 0x0f) + 0x30;
-
-          if (myHex > 0x39) { myHex += 7; }
-          log += myHex;
-          addLogMove(LOG_LEVEL_INFO, log);
-            #  endif // PLUGIN_046_DEBUG
-            # endif // BUILD_NO_DEBUG
-
-          if (crc != 00)
-          {
-            P046_data->Plugin_046_databuffer[0] = 0; // Not MagicByte, so not valid.
-          }
         }
       }
       success = true;
@@ -615,16 +634,93 @@ void Plugin_046_ISR_nSEL() // Interrupt on nSEL change
   }
 }
 
+# ifdef ESP8266
+
+// Interrupt on nSEL falling: capture the complete SPI transfer by polling the pins inside the ISR.
+// With one interrupt per clock edge (the functions above/below) the delay until the ISR runs varies with
+// WiFi and other activity. Bits were then sampled too late (reading the next bit) or edges were missed,
+// so only about 1 in 3 frames passed the CRC. Here the data pin is taken from the very same GPI read
+// that detects the rising clock edge.
+void Plugin_046_ISR_capture()
+{
+  if (!P046_data || P046_data->Plugin_046_newData) { return; } // Only accept new data if the old is processed
+
+  const uint32_t selMask  = 1UL << P046_data->Plugin_046_nSELpin;
+  const uint32_t clkMask  = 1UL << P046_data->Plugin_046_SCLKpin;
+  const uint32_t misoMask = 1UL << P046_data->Plugin_046_MISOpin;
+  uint32_t dataMask       = 1UL << P046_data->Plugin_046_MOSIpin; // Start on MOSI, switch to MISO after the MagicByte
+  const uint32_t start    = micros();
+  uint8_t  bytes          = 0;
+  bool     gotMagic       = false;
+  bool     timedOut       = false;
+  bool     done           = false;
+
+  while (!done) {
+    uint8_t value = 0;
+
+    for (uint8_t bit = 0; (bit < 8) && !done; ++bit) {
+      uint32_t guard = Plugin_046_ISR_WAIT;
+      uint32_t gpi;
+
+      // Wait for SCLK low, then for its rising edge. nSEL high ends the transfer.
+      while (!done && ((gpi = GPI) & clkMask)) {
+        if (gpi & selMask) { done = true; }
+        else if (--guard == 0) { done = true; timedOut = true; }
+      }
+
+      while (!done && !((gpi = GPI) & clkMask)) {
+        if (gpi & selMask) { done = true; }
+        else if (--guard == 0) { done = true; timedOut = true; }
+      }
+
+      if (!done) {
+        value = (value << 1) | ((gpi & dataMask) ? 1 : 0); // MSB first
+      }
+    }
+
+    if (!done) { // 8 bits received
+      if (bytes < Plugin_046_RAW_BUFFER_SIZE) {
+        P046_data->Plugin_046_ISR_Buffer[bytes] = value;
+      }
+
+      if (value == Plugin_046_MagicByte) { // Switch data pins?
+        gotMagic = true;
+        dataMask = misoMask;
+      }
+
+      if (bytes < 255) { ++bytes; }
+    }
+  }
+
+  if (gotMagic && !timedOut && (bytes == Plugin_046_Payload)) { // If not 23 then not a data packet
+    P046_data->Plugin_046_bytepointer   = bytes;
+    P046_data->Plugin_046_captureMicros = micros() - start;
+    P046_data->Plugin_046_newData       = true;                 // We have new data!
+  }
+}
+
+# endif // ifdef ESP8266
+
 void Plugin_046_ISR_SCLK() // Interrupt on SCLK rising
 {
+  # ifdef ESP8266
+
+  // Sample all inputs at once, as the very first action: the data is only valid for a short time after the
+  // clock edge. Reading the pin later (after the checks below, via digitalRead) regularly picked up wrong bits.
+  const uint32_t gpi = GPI;
+  # endif // ifdef ESP8266
+
   if (!P046_data) { return; }
 
   if (P046_data->Plugin_046_ReceiveActive) { // Are we receiving or glitch?
-    if (P046_data->Plugin_046_MasterSlave) { // Read MISO or MOSI?
-      bitWrite(P046_data->Plugin_046_receivedData, P046_data->Plugin_046_bitpointer, digitalRead(P046_data->Plugin_046_MISOpin));
-    } else {
-      bitWrite(P046_data->Plugin_046_receivedData, P046_data->Plugin_046_bitpointer, digitalRead(P046_data->Plugin_046_MOSIpin));
-    }
+    // Read MISO or MOSI?
+    const int8_t pin = P046_data->Plugin_046_MasterSlave ? P046_data->Plugin_046_MISOpin : P046_data->Plugin_046_MOSIpin;
+    # ifdef ESP8266
+    const bool bit = (pin < 16) ? ((gpi >> pin) & 1) : digitalRead(pin); // GPIO-16 is not part of GPI
+    # else // ifdef ESP8266
+    const bool bit = digitalRead(pin);
+    # endif // ifdef ESP8266
+    bitWrite(P046_data->Plugin_046_receivedData, P046_data->Plugin_046_bitpointer, bit);
 
     if (P046_data->Plugin_046_bitpointer == 0) {                        // 8 bits done?
       P046_data->Plugin_046_bitpointer = 7;
