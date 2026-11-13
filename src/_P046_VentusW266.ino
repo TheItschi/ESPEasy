@@ -599,14 +599,24 @@ void Plugin_046_ISR_nSEL() // Interrupt on nSEL change
 
 void Plugin_046_ISR_SCLK() // Interrupt on SCLK rising
 {
+  # ifdef ESP8266
+
+  // Sample all inputs at once, as the very first action: the data is only valid for a short time after the
+  // clock edge. Reading the pin later (after the checks below, via digitalRead) regularly picked up wrong bits.
+  const uint32_t gpi = GPI;
+  # endif // ifdef ESP8266
+
   if (!P046_data) { return; }
 
   if (P046_data->Plugin_046_ReceiveActive) { // Are we receiving or glitch?
-    if (P046_data->Plugin_046_MasterSlave) { // Read MISO or MOSI?
-      bitWrite(P046_data->Plugin_046_receivedData, P046_data->Plugin_046_bitpointer, digitalRead(P046_data->Plugin_046_MISOpin));
-    } else {
-      bitWrite(P046_data->Plugin_046_receivedData, P046_data->Plugin_046_bitpointer, digitalRead(P046_data->Plugin_046_MOSIpin));
-    }
+    // Read MISO or MOSI?
+    const int8_t pin = P046_data->Plugin_046_MasterSlave ? P046_data->Plugin_046_MISOpin : P046_data->Plugin_046_MOSIpin;
+    # ifdef ESP8266
+    const bool bit = (pin < 16) ? ((gpi >> pin) & 1) : digitalRead(pin); // GPIO-16 is not part of GPI
+    # else // ifdef ESP8266
+    const bool bit = digitalRead(pin);
+    # endif // ifdef ESP8266
+    bitWrite(P046_data->Plugin_046_receivedData, P046_data->Plugin_046_bitpointer, bit);
 
     if (P046_data->Plugin_046_bitpointer == 0) {                        // 8 bits done?
       P046_data->Plugin_046_bitpointer = 7;
