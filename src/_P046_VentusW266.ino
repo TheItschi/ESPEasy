@@ -124,14 +124,7 @@ struct P046_data_struct {
   uint8_t Plugin_046_bytepointer;                            // Pointer for ISR receive buffer
   uint8_t Plugin_046_receivedData;                           // Byte to store received bits
   uint32_t Plugin_046_captureMicros = 0;                     // Duration of the last captured transfer (ESP8266 capture ISR)
-  uint8_t  Plugin_046_unstableBits  = 0;                     // Bits whose level changed right after the clock edge
 
-  // Diagnostics of the capture ISR, logged once a minute
-  uint16_t Plugin_046_statTransfers = 0;                     // SPI transfers seen (nSEL low)
-  uint16_t Plugin_046_statMagic     = 0;                     // ... of which started with the MagicByte (FIFO read)
-  uint16_t Plugin_046_statTimeouts  = 0;                     // ... of which ran into the poll limit
-  uint8_t  Plugin_046_statLastLen   = 0;                     // Length in bytes of the last rejected FIFO read
-  uint32_t Plugin_046_statLastLog   = 0;
 };
 
 # include "./ESPEasy-Globals.h"
@@ -425,20 +418,6 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
       if (!P046_data) { break; }
 
       if (PCONFIG(0) == 0) {
-        if (timePassedSince(P046_data->Plugin_046_statLastLog) > 60000) {
-          P046_data->Plugin_046_statLastLog = millis();
-
-          if (loglevelActiveFor(LOG_LEVEL_INFO)) {
-            addLog(LOG_LEVEL_INFO, strformat(F("W266 : last minute: %u SPI transfers, %u FIFO reads, %u timeouts, last rejected length %u"),
-                                             P046_data->Plugin_046_statTransfers, P046_data->Plugin_046_statMagic,
-                                             P046_data->Plugin_046_statTimeouts, P046_data->Plugin_046_statLastLen));
-          }
-          P046_data->Plugin_046_statTransfers = 0;
-          P046_data->Plugin_046_statMagic     = 0;
-          P046_data->Plugin_046_statTimeouts  = 0;
-          P046_data->Plugin_046_statLastLen   = 0;
-        }
-
         if (P046_data->Plugin_046_newData) {
           uint8_t crc = 0xff; // init = 0xff
           char    data;       // CRC = MAXIM with modified init: poly 0x31, init 0xff, refin 1; refout 1, xorout 0x00
@@ -457,7 +436,13 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
               data >>= 1;
             }
           }
-          if (crc == 0)
+          // The 8 bit CRC lets about 1 in 256 corrupted frames pass, so also use the redundancy in the frame:
+          // the temperature is sent twice and the humidity is BCD.
+          const uint8_t *frame = P046_data->Plugin_046_ISR_Buffer;
+          const bool plausible = (frame[4] == frame[7]) && (frame[5] == frame[8]) &&
+                                 ((frame[2] >> 4) <= 9) && ((frame[2] & 0x0F) <= 9);
+
+          if ((crc == 0) && plausible)
           {
             memcpy(P046_data->Plugin_046_databuffer, P046_data->Plugin_046_ISR_Buffer, Plugin_046_Payload);
           }
@@ -473,13 +458,12 @@ boolean Plugin_046(uint8_t function, struct EventStruct *event, String& string)
               }
               log += formatToHex_no_prefix(P046_data->Plugin_046_ISR_Buffer[i], 2);
             }
-            log += (crc == 0) ? F(" OK") : F(" CRC error");
+            log += (crc != 0) ? F(" CRC error") : (plausible ? F(" OK") : F(" implausible, ignored"));
 
             if (P046_data->Plugin_046_captureMicros != 0) {
               log += ' ';
               log += P046_data->Plugin_046_captureMicros;
-              log += F("us unstable=");
-              log += P046_data->Plugin_046_unstableBits;
+              log += F("us");
             }
             addLogMove(LOG_LEVEL_INFO, log);
           }
@@ -664,7 +648,6 @@ void Plugin_046_ISR_capture()
   bool     gotMagic       = false;
   bool     timedOut       = false;
   bool     done           = false;
-  uint8_t  unstable       = 0;
 
   while (!done) {
     uint8_t value = 0;
@@ -686,16 +669,6 @@ void Plugin_046_ISR_capture()
 
       if (!done) {
         value = (value << 1) | ((gpi & dataMask) ? 1 : 0); // MSB first
-
-        // Diagnostics: re-read the data pin for about 2 usec after the edge. A level that changes here means the
-        // bit was sampled on an unstable line; a CRC error without such bits was already wrong on the SPI bus.
-        uint32_t changed = 0;
-
-        for (uint8_t i = 0; i < 16; ++i) {
-          changed |= (GPI ^ gpi);
-        }
-
-        if ((changed & dataMask) && (unstable < 255)) { ++unstable; }
       }
     }
 
@@ -713,20 +686,9 @@ void Plugin_046_ISR_capture()
     }
   }
 
-  ++P046_data->Plugin_046_statTransfers;
-
-  if (timedOut) { ++P046_data->Plugin_046_statTimeouts; }
-
-  if (gotMagic) {
-    ++P046_data->Plugin_046_statMagic;
-
-    if (timedOut || (bytes != Plugin_046_Payload)) { P046_data->Plugin_046_statLastLen = bytes; }
-  }
-
   if (gotMagic && !timedOut && (bytes == Plugin_046_Payload)) { // If not 23 then not a data packet
     P046_data->Plugin_046_bytepointer   = bytes;
     P046_data->Plugin_046_captureMicros = micros() - start;
-    P046_data->Plugin_046_unstableBits  = unstable;
     P046_data->Plugin_046_newData       = true;                 // We have new data!
   }
 }
